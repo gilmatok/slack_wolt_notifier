@@ -17,8 +17,8 @@ if SLACK_TOKEN is None:
 
 SLACK_CLIENT = WebClient(SLACK_TOKEN)
 
-URL_SEARCH = 'https://restaurant-api.wolt.com/v1/search?sort=releveancy&q=%s/'
-URL_REST_INFO = 'https://restaurant-api.wolt.com/v3/venues/slug/%s/'
+URL_SEARCH = 'https://restaurant-api.wolt.com/v1/search?sort=releveancy&q=%s'
+URL_REST_INFO = 'https://restaurant-api.wolt.com/v3/venues/slug/%s'
 
 SCHEDULED_CHECKS = {}
 
@@ -32,38 +32,52 @@ def send_message(user_id, text):
     )
 
 def check():
-    users_to_delete = []
+    if SCHEDULED_CHECKS:
+        print(f'Processing {str(len(SCHEDULED_CHECKS))} jobs...', flush=True)
 
-    for user_id in SCHEDULED_CHECKS:
-        slug = SCHEDULED_CHECKS[user_id]
-        response = requests.get(URL_REST_INFO % SCHEDULED_CHECKS[user_id])
+        users_to_delete = []
 
-        if response.status_code != 200:
-            continue
+        for user_id in SCHEDULED_CHECKS:
+            try:
+                response = requests.get(URL_REST_INFO % SCHEDULED_CHECKS[user_id])
 
-        result = response['results'][0]
+                response.raise_for_status()
 
-        # Prefer Hebrew name
-        try:
-            rest_name = list(filter(lambda x: x["lang"] == "he", result["name"]))[
-                0]["value"]
-        except:
-            rest_name = list(filter(lambda x: x["lang"] == "en", result["name"]))[
-                0]["value"]
+                result = response.json()['results'][0]
 
-        is_online = result['online']
-        order_url = result['public_url']
+                # Prefer Hebrew name
+                try:
+                    rest_name = list(filter(lambda x: x["lang"] == "he", result["name"]))[
+                        0]["value"]
+                except:
+                    rest_name = list(filter(lambda x: x["lang"] == "en", result["name"]))[
+                        0]["value"]
 
-        if is_online:
-            send_message(
-                user_id,
-                f'Yay! :sunglasses: *{rest_name}* is available for orders <{order_url}|here>.'
-            )
+                is_online = result['online']
 
-            users_to_delete.append(user_id)
+                if is_online:
+                    order_url = result['public_url']
 
-    for user_id in users_to_delete:
-        del SCHEDULED_CHECKS[user_id]
+                    send_message(
+                        user_id,
+                        f'Yay! :sunglasses: *{rest_name}* is available for orders <{order_url}|here>.'
+                    )
+
+                    users_to_delete.append(user_id)
+            except Exception as e:
+                print(f'Unable to process job (User ID: {user_id}, Slug: {SCHEDULED_CHECKS[user_id]}: {str(e)}', flush=True)
+
+                send_message(
+                    user_id,
+                    'Woops, something went wrong on our side! :scream_cat: Please reschedule your notification.'
+                )
+                
+                users_to_delete.append(user_id)
+
+        for user_id in users_to_delete:
+            del SCHEDULED_CHECKS[user_id]
+
+        print(f'Done ({str(len(users_to_delete))})', flush=True)
 
     t = threading.Timer(CHECK_INTERVAL, check)
     t.daemon = True
@@ -72,8 +86,7 @@ def check():
 def find_restaurant(query):
     response = requests.get(URL_SEARCH % query)
 
-    if response.status_code != 200:
-        return 'Unable to contact Wolt servers; please try again in a few minutes.'
+    response.raise_for_status()
 
     results = response.json()['results']
 
@@ -95,7 +108,7 @@ def find_restaurant(query):
     return ret
 
 @app.route('/', methods=['POST'])
-def hello_world():
+def regular_callback():
     user_id = request.form['user_id']
     command = request.form['command']
     text = request.form['text']
@@ -114,6 +127,9 @@ def hello_world():
         try:
             results = find_restaurant(text)
         except:
+            return "Oops, something went wrong! :cry: Please try again."
+
+        if not results:
             return "I didn't find any results matching this restaurant name :cry:. Try to be more specific!"
 
         attachments = [
@@ -150,7 +166,6 @@ def hello_world():
 
 @app.route("/interactive_callback", methods=["POST"])
 def interactive_callback():
-    print('Got interactive!', flush=True)
     payload = json.loads(request.form['payload'])
     user_id = payload['user']['id']
     user_name = payload['user']['name']
@@ -159,6 +174,8 @@ def interactive_callback():
     slug = pair[1]
 
     SCHEDULED_CHECKS[user_id] = slug
+
+    print(f"Scheduled notification for user '{user_name} for restaurant {rest_name} ({slug})", flush=True)
 
     return f'Awesome! I will notify you as soon as {rest_name} is available for orders! :smile:'
 
